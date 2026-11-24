@@ -1,0 +1,59 @@
+name: Auto-merge dependency PRs
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge for safe PRs
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const title = pr.title.toLowerCase();
+            const safe = title.includes('bump') || title.includes('deps');
+
+            if (!safe) {
+              core.info('Skipped auto-merge: title does not match.');
+              return;
+            }
+
+            const maxAttempts = 5;
+            const delayMs = 15000;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              try {
+                await github.graphql(`
+                  mutation($pullRequestId: ID!) {
+                    enablePullRequestAutoMerge(input: {
+                      pullRequestId: $pullRequestId,
+                      mergeMethod: SQUASH
+                    }) {
+                      clientMutationId
+                    }
+                  }
+                `, { pullRequestId: pr.node_id });
+
+                core.info(`Auto-merge enabled on attempt ${attempt}.`);
+                return;
+              } catch (error) {
+                const message = error.errors?.[0]?.message ?? error.message;
+                const transient = message.includes('unstable status') ||
+                                  message.includes('is not in a mergeable state');
+
+                if (!transient || attempt === maxAttempts) {
+                  throw error;
+                }
+
+                core.info(`Attempt ${attempt} failed (${message}). Retrying in ${delayMs / 1000}s...`);
+                await new Promise(r => setTimeout(r, delayMs));
+              }
+            }
